@@ -1,5 +1,10 @@
 #!/usr/bin/env ruby
 
+# This script will suspend your torrent client if a specific VPN connection is
+# disabled, and resume the torrent client when the VPN is enabled. A sound is
+# played periodically while the torrent client is suspended (TODO). Please edit the
+# constants below for configuration.
+
 require 'dbus'
 require 'pp'
 require 'thread'
@@ -30,7 +35,7 @@ def on_vpn(nm_service, active_conn_paths, vpn_path)
     ac_obj = nm_service.object(ac_path)
     ac_iface = ac_obj['org.freedesktop.NetworkManager.Connection.Active']
     begin
-      return true if ac_iface['Connection'] == vpn_path
+      return true if ac_iface && ac_iface['Connection'] == vpn_path
     rescue DBus::Error
       next
     end
@@ -38,6 +43,7 @@ def on_vpn(nm_service, active_conn_paths, vpn_path)
   false
 end
 
+# Connectivity states: https://developer.gnome.org/NetworkManager/unstable/nm-dbus-types.html#NMConnectivityState
 def take_action
   if @connectivity >= 2 && !@connected_to_vpn
     puts "#{Time.now} Pausing"
@@ -95,8 +101,8 @@ active_conn_paths = nm_iface['ActiveConnections']
 take_action
 
 nm_iface.on_signal('PropertiesChanged') do |changed|
-  @connectivity      ||= changed['Connectivity']
-  active_conn_paths = changed['ActiveConnections']
+  @connectivity     ||= changed['Connectivity']
+  active_conn_paths   = changed['ActiveConnections']
   if active_conn_paths
     @connected_to_vpn = on_vpn(nm_service, active_conn_paths, vpn.path)
   end
