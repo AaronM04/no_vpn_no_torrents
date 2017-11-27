@@ -9,7 +9,7 @@ require 'dbus'
 require 'pp'
 require 'thread'
 
-CONNECTION_ID = "ipvanish-US-New-York-nyc-a01"
+CONNECTION_ID = "tun0" # OLD: "ipvanish-US-New-York-nyc-a01"
 TORRENT_CLIENT = 'transmission-gtk'
 ALARM_COMMAND = 'mpv'
 ALARM_SOUND = '/usr/lib64/libreoffice/share/gallery/sounds/laser.wav'
@@ -30,17 +30,28 @@ def alarm
   end
 end
 
-def on_vpn(nm_service, active_conn_paths, vpn_path)
+
+def get_active_settings(nm_service, active_conn_paths, settings)
+  active_paths = []
   active_conn_paths.each do |ac_path|
     ac_obj = nm_service.object(ac_path)
     ac_iface = ac_obj['org.freedesktop.NetworkManager.Connection.Active']
     begin
-      return true if ac_iface && ac_iface['Connection'] == vpn_path
+      active_paths.push(ac_iface['Connection']) if ac_iface
     rescue DBus::Error
       next
     end
   end
-  false
+  settings.select{|setting| active_paths.include?(setting.path) }
+end
+
+
+
+def on_vpn(nm_service, nm_iface)
+  settings = Setting.get_settings(nm_service)
+  active_conn_paths = nm_iface['ActiveConnections']
+  active_settings = get_active_settings(nm_service, active_conn_paths, settings)
+  active_settings.count{|s| s.id == CONNECTION_ID } > 0
 end
 
 # Connectivity states: https://developer.gnome.org/NetworkManager/unstable/nm-dbus-types.html#NMConnectivityState
@@ -88,23 +99,20 @@ end
 bus = DBus.system_bus
 nm_service = bus.service('org.freedesktop.NetworkManager')
 
-settings = Setting.get_settings(nm_service)
-vpn = settings.find{|setting| setting.id == CONNECTION_ID }
-raise "could not find connection setting with ID #{CONNECTION_ID}" unless vpn
 
 nm_obj   = nm_service.object('/org/freedesktop/NetworkManager')
 nm_iface = nm_obj['org.freedesktop.NetworkManager']
 
 @connectivity = nm_iface['Connectivity']
 active_conn_paths = nm_iface['ActiveConnections']
-@connected_to_vpn = on_vpn(nm_service, active_conn_paths, vpn.path)
+@connected_to_vpn = on_vpn(nm_service, nm_iface)
 take_action
 
 nm_iface.on_signal('PropertiesChanged') do |changed|
   @connectivity     ||= changed['Connectivity']
   active_conn_paths   = changed['ActiveConnections']
   if active_conn_paths
-    @connected_to_vpn = on_vpn(nm_service, active_conn_paths, vpn.path)
+    @connected_to_vpn = on_vpn(nm_service, nm_iface)
   end
   take_action
 end
