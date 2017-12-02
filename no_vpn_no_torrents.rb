@@ -13,6 +13,7 @@ CONNECTION_ID = "tun0" # OLD: "ipvanish-US-New-York-nyc-a01"
 TORRENT_CLIENT = 'transmission-gtk'
 ALARM_COMMAND = 'mpv'
 ALARM_SOUND = '/usr/lib64/libreoffice/share/gallery/sounds/laser.wav'
+SLEEP = 0.5
 
 def pause_torrents
   `kill -STOP $(pidof #{TORRENT_CLIENT})`
@@ -48,7 +49,17 @@ end
 
 
 def on_vpn(nm_service, nm_iface)
-  settings = Setting.get_settings(nm_service)
+  retries = 2
+  begin
+    settings = Setting.get_settings(nm_service)
+  rescue DBus::Error
+    if retries > 0
+      retries -= 1
+      puts "#{Time.now} Caught #{$!} but sleeping and retrying (#{retries} left)"
+      sleep SLEEP
+      retry
+    end
+  end
   active_conn_paths = nm_iface['ActiveConnections']
   active_settings = get_active_settings(nm_service, active_conn_paths, settings)
   active_settings.count{|s| s.id == CONNECTION_ID } > 0
