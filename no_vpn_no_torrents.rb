@@ -14,6 +14,7 @@ TORRENT_CLIENT = 'transmission-gtk'
 ALARM_COMMAND = 'mpv'
 ALARM_SOUND = '/usr/lib64/libreoffice/share/gallery/sounds/laser.wav'
 SLEEP = 0.5
+TICK  = 5
 
 def pause_torrents
   `kill -STOP $(pidof #{TORRENT_CLIENT})`
@@ -31,6 +32,8 @@ def alarm
   end
 end
 
+@queue = Queue.new
+
 
 def get_active_settings(nm_service, active_conn_paths, settings)
   active_paths = []
@@ -46,6 +49,10 @@ def get_active_settings(nm_service, active_conn_paths, settings)
   settings.select{|setting| active_paths.include?(setting.path) }
 end
 
+
+def routes_present?
+   `ip route`.lines.grep(/0\.0\.0\/1 via.*tun0/).count == 2
+end
 
 
 def on_vpn(nm_service, nm_iface)
@@ -63,18 +70,6 @@ def on_vpn(nm_service, nm_iface)
   active_conn_paths = nm_iface['ActiveConnections']
   active_settings = get_active_settings(nm_service, active_conn_paths, settings)
   active_settings.count{|s| s.id == CONNECTION_ID } > 0
-end
-
-# Connectivity states: https://developer.gnome.org/NetworkManager/unstable/nm-dbus-types.html#NMConnectivityState
-def take_action
-  if @connectivity >= 2 && !@connected_to_vpn
-    puts "#{Time.now} Pausing"
-    pause_torrents
-    alarm
-  else
-    puts "#{Time.now} Continuing"
-    continue_torrents
-  end
 end
 
 class Setting
@@ -107,6 +102,62 @@ class Setting
   end
 end
 
+
+class QueueConsumer
+  EVENTS = [:connect, :disconnect, :tick]
+
+  def self.consume(queue)
+    state = nil    #STATES:  :disconnected, :connected, :connect_when_safe
+    Thread.new do 
+      loop do
+        event = queue.pop
+        raise "unexpected queue event: #{event.inspect}" unless EVENTS.include? event
+        if event == :disconnect
+          puts "#{Time.now} Pausing"
+          old_state = state
+          state = :disconnected
+          pause_torrents
+          alarm unless old_state == :disconnected
+        elsif event == :connect
+          if routes_present?
+            puts "#{Time.now} Continuing"
+            state = :connected
+            continue_torrents
+          else
+            puts "#{Time.now} Not continuing because routes not present (and pausing for extra safety)"
+            pause_torrents
+            state = :connect_when_safe
+          end
+        elsif event == :tick
+          if state == :connect_when_safe
+            if routes_present?
+              puts "#{Time.now} Continuing now that routes are safe"
+              state = :connected
+              continue_torrents
+            else
+              puts "#{Time.now} Not continuing because routes are still not present (and pausing for extra safety)"
+              pause_torrents
+            end
+          end
+        else
+          raise "wtf"
+        end
+      end
+    end
+  end
+end
+
+
+def tick_sender_thread(queue)
+  Thread.new do
+    loop do
+      sleep TICK
+      queue.push :tick
+    end
+  end
+end
+
+
 bus = DBus.system_bus
 nm_service = bus.service('org.freedesktop.NetworkManager')
 
@@ -114,10 +165,18 @@ nm_service = bus.service('org.freedesktop.NetworkManager')
 nm_obj   = nm_service.object('/org/freedesktop/NetworkManager')
 nm_iface = nm_obj['org.freedesktop.NetworkManager']
 
+# Connectivity states: https://developer.gnome.org/NetworkManager/unstable/nm-dbus-types.html#NMConnectivityState
 @connectivity = nm_iface['Connectivity']
 active_conn_paths = nm_iface['ActiveConnections']
 @connected_to_vpn = on_vpn(nm_service, nm_iface)
-take_action
+if @connectivity >= 2 && !@connected_to_vpn
+  puts "#{Time.now} Pausing"
+  pause_torrents
+  alarm
+else
+  puts "#{Time.now} Continuing"
+  continue_torrents
+end
 
 nm_iface.on_signal('PropertiesChanged') do |changed|
   @connectivity     ||= changed['Connectivity']
@@ -125,14 +184,23 @@ nm_iface.on_signal('PropertiesChanged') do |changed|
   if active_conn_paths
     @connected_to_vpn = on_vpn(nm_service, nm_iface)
   end
-  take_action
+  if @connectivity >= 2 && !@connected_to_vpn
+    @queue.push(:disconnect)
+  else
+    @queue.push(:connect)
+  end
 end
+
+#### Start other threads and then runloop
+QueueConsumer.consume(@queue)
+tick_sender_thread(@queue)
 
 runloop = DBus::Main.new
 runloop << bus
 begin
   runloop.run
 rescue Exception => e
-  continue_torrents
+  puts "#{Time.now} caught fatal exception #{e}; pausing torrents and exiting"
+  pause_torrents
   raise
 end
