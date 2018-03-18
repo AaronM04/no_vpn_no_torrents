@@ -16,6 +16,8 @@ ALARM_SOUND = '/usr/lib64/libreoffice/share/gallery/sounds/laser.wav'
 SLEEP = 0.5
 TICK  = 5
 
+DEBUG_LOG = false
+
 def pause_torrents
   `kill -STOP $(pidof #{TORRENT_CLIENT})`
 end
@@ -62,7 +64,7 @@ def on_vpn(nm_service, nm_iface)
   rescue DBus::Error
     if retries > 0
       retries -= 1
-      puts "#{Time.now} Caught #{$!} but sleeping and retrying (#{retries} left)"
+      $stdout.write( "#{Time.now} Caught #{$!} but sleeping and retrying (#{retries} left)\n" ); $stdout.flush
       sleep SLEEP
       retry
     end
@@ -86,7 +88,7 @@ class Setting
     conn_paths.map do |conn_path|
       conn_object = nm_service.object(conn_path)
       conn_iface = conn_object['org.freedesktop.NetworkManager.Settings.Connection']
-      #puts "Setting #{n}: #{conn_iface.GetSettings}\n\n"
+      #$stdout.write( "Setting #{n}: #{conn_iface.GetSettings}\n\n\n" ); $stdout.flush
       Setting.new(conn_path, conn_iface.GetSettings.first)
     end
   end
@@ -108,34 +110,43 @@ class QueueConsumer
 
   def self.consume(queue)
     state = nil    #STATES:  :disconnected, :connected, :connect_when_safe
+    def transition(old_state, new_state)
+      "#{old_state} -> #{new_state}"
+    end
     Thread.new do 
       loop do
         event = queue.pop
+        if DEBUG_LOG
+          $stdout.write "#{Time.now} DEBUG: QueueConsumer: received #{event} from queue\n"
+          $stdout.flush
+        end
         raise "unexpected queue event: #{event.inspect}" unless EVENTS.include? event
         if event == :disconnect
-          puts "#{Time.now} Pausing"
           old_state = state
           state = :disconnected
+          $stdout.write( "#{Time.now} (EVT:#{event}; #{transition(old_state, state)}) Pausing\n" ); $stdout.flush
           pause_torrents
           alarm unless old_state == :disconnected
         elsif event == :connect
           if routes_present?
-            puts "#{Time.now} Continuing"
+            old_state = state
             state = :connected
+            $stdout.write( "#{Time.now} (EVT:#{event}; #{transition(old_state, state)}) Continuing\n" ); $stdout.flush
             continue_torrents
           else
-            puts "#{Time.now} Not continuing because routes not present (and pausing for extra safety)"
+            $stdout.write( "#{Time.now} (EVT:#{event}; #{state}) Not continuing because routes not present (and pausing for extra safety)\n" ); $stdout.flush
             pause_torrents
             state = :connect_when_safe
           end
         elsif event == :tick
           if state == :connect_when_safe
             if routes_present?
-              puts "#{Time.now} Continuing now that routes are safe"
+              old_state = state
               state = :connected
+              $stdout.write( "#{Time.now} (EVT:#{event}; #{transition(old_state, state)}) Continuing now that routes are safe\n" ); $stdout.flush
               continue_torrents
             else
-              puts "#{Time.now} Not continuing because routes are still not present (and pausing for extra safety)"
+              $stdout.write( "#{Time.now} (EVT:#{event}; #{state}) Not continuing because routes are still not present (and pausing for extra safety)\n" ); $stdout.flush
               pause_torrents
             end
           end
@@ -152,6 +163,10 @@ def tick_sender_thread(queue)
   Thread.new do
     loop do
       sleep TICK
+      if DEBUG_LOG
+        $stdout.write "#{Time.now} DEBUG: pushing :tick to queue\n"
+        $stdout.flush
+      end
       queue.push :tick
     end
   end
@@ -170,23 +185,35 @@ nm_iface = nm_obj['org.freedesktop.NetworkManager']
 active_conn_paths = nm_iface['ActiveConnections']
 @connected_to_vpn = on_vpn(nm_service, nm_iface)
 if @connectivity >= 2 && !@connected_to_vpn
-  puts "#{Time.now} Pausing"
+  $stdout.write( "#{Time.now} Pausing\n" ); $stdout.flush
   pause_torrents
   alarm
 else
-  puts "#{Time.now} Continuing"
+  $stdout.write( "#{Time.now} Continuing\n" ); $stdout.flush
   continue_torrents
 end
 
 nm_iface.on_signal('PropertiesChanged') do |changed|
+  if DEBUG_LOG
+    $stdout.write "#{Time.now} DEBUG: received PropertiesChanged\n"
+    $stdout.flush
+  end
   @connectivity     ||= changed['Connectivity']
   active_conn_paths   = changed['ActiveConnections']
   if active_conn_paths
     @connected_to_vpn = on_vpn(nm_service, nm_iface)
   end
   if @connectivity >= 2 && !@connected_to_vpn
+    if DEBUG_LOG
+      $stdout.write "#{Time.now} DEBUG: pushing :disconnect to queue\n"
+      $stdout.flush
+    end
     @queue.push(:disconnect)
   else
+    if DEBUG_LOG
+      $stdout.write "#{Time.now} DEBUG: pushing :connect to queue\n"
+      $stdout.flush
+    end
     @queue.push(:connect)
   end
 end
@@ -200,7 +227,7 @@ runloop << bus
 begin
   runloop.run
 rescue Exception => e
-  puts "#{Time.now} caught fatal exception #{e}; pausing torrents and exiting"
+  $stdout.write( "#{Time.now} caught fatal exception #{e}; pausing torrents and exiting\n" ); $stdout.flush
   pause_torrents
   raise
 end
